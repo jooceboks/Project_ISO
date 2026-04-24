@@ -187,7 +187,3 @@ These values are set in the firmware and should be calibrated with the physical 
 | Control comms | WebSocket (WiFi, port 81) |
 | CAD | SolidWorks |
 | Standard | ISO 14644-1 cleanroom classification |
-
----
-
-## Quick Start

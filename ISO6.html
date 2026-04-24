@@ -1,0 +1,1076 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ISO 6 Cleanroom Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+  * { font-family: 'JetBrains Mono', 'Courier New', monospace; }
+  body { background-color: #0d1117; }
+
+  .glow-green  { box-shadow: 0 0 12px rgba(72,187,120,0.35); }
+  .glow-red    { box-shadow: 0 0 12px rgba(245,101,101,0.35); }
+  .glow-yellow { box-shadow: 0 0 12px rgba(237,137,54,0.35); }
+  .glow-blue   { box-shadow: 0 0 12px rgba(66,153,225,0.35); }
+
+  .chart-container { height: 90px; }
+
+  .status-indicator { width:8px; height:8px; border-radius:50%; display:inline-block; }
+  .status-ok      { background-color:#48bb78; }
+  .status-error   { background-color:#f56565; }
+  .status-offline { background-color:#4a5568; }
+
+  @keyframes pulse-green {
+    0%,100% { box-shadow:0 0 4px rgba(72,187,120,.4); }
+    50%      { box-shadow:0 0 16px rgba(72,187,120,.9); }
+  }
+  @keyframes pulse-red {
+    0%,100% { box-shadow:0 0 4px rgba(245,101,101,.4); }
+    50%      { box-shadow:0 0 16px rgba(245,101,101,.9); }
+  }
+  @keyframes blink { 0%,100%{opacity:1;} 50%{opacity:.3;} }
+  @keyframes hb {
+    0%  {transform:scale(1);   opacity:1;}
+    50% {transform:scale(1.6); opacity:.6;}
+    100%{transform:scale(1);   opacity:1;}
+  }
+
+  .pulse-green { animation: pulse-green 1.4s ease-in-out infinite; }
+  .pulse-red   { animation: pulse-red   1s   ease-in-out infinite; }
+  .blink       { animation: blink 1s linear infinite; }
+  .hb-dot      { animation: hb .8s ease-in-out infinite; }
+
+  .tl-light {
+    width:36px; height:36px; border-radius:50%;
+    border:2px solid #2d3748;
+    transition: background-color .5s, box-shadow .5s;
+  }
+  .tl-green-on  { background:#48bb78; box-shadow:0 0 18px rgba(72,187,120,.8); }
+  .tl-yellow-on { background:#ed8936; box-shadow:0 0 18px rgba(237,137,54,.8); }
+  .tl-red-on    { background:#f56565; box-shadow:0 0 18px rgba(245,101,101,.8); }
+  .tl-off       { background:#1a202c; }
+
+  .pc-cell {
+    background:#0a0e14; border:1px solid #2d3748;
+    border-radius:4px; padding:8px; text-align:center;
+    transition: border-color .3s;
+  }
+  .pc-cell.hot  { border-color:#f56565; }
+  .pc-cell.warm { border-color:#ed8936; }
+
+  /* Pressure gauge arc */
+  .pressure-gauge { position:relative; width:120px; height:68px; overflow:hidden; }
+  .pressure-gauge svg { position:absolute; top:0; left:0; }
+</style>
+</head>
+<body class="text-white min-h-screen p-4 md:p-6">
+<div class="max-w-7xl mx-auto space-y-4">
+
+  <!-- ── Header ── -->
+  <div class="border border-gray-700 rounded-lg p-4 bg-gray-900 flex flex-col md:flex-row md:items-center justify-between gap-3">
+    <div>
+      <h1 class="text-lg font-bold tracking-widest uppercase">ISO 6 Cleanroom Dashboard</h1>
+      <div class="text-xs text-gray-500 mt-0.5">SHT31 · PMS7003 · MPXV7002DP · Arduino Uno R3 · Web Serial</div>
+    </div>
+    <div class="flex items-center gap-3 flex-wrap">
+      <button id="btnConnect" class="border border-green-500 text-green-500 py-2 px-4 rounded hover:bg-green-900/30 transition-all text-sm">connect serial</button>
+      <button id="btnDisconnect" disabled class="border border-red-500 text-red-500 py-2 px-4 rounded hover:bg-red-900/30 transition-all text-sm opacity-40">disconnect</button>
+      <button id="btnSyncTime" class="border border-gray-600 text-gray-400 py-2 px-4 rounded hover:border-blue-400 hover:text-blue-400 transition-all text-sm">sync time</button>
+      <div class="text-xs text-gray-500 tabular-nums">
+        <span id="clockValue" class="text-gray-300">--:--:--</span>
+        &nbsp;|&nbsp;
+        <span id="syncBadge" class="text-gray-600">unsynced</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Status row ── -->
+  <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+
+    <!-- Connection -->
+    <div id="connBox" class="border border-gray-700 rounded-lg p-3 bg-gray-900 flex items-center gap-2">
+      <span class="status-indicator status-offline" id="connDot"></span>
+      <div>
+        <div class="text-xs text-gray-500">connection</div>
+        <div id="connLabel" class="text-sm text-gray-400">disconnected</div>
+      </div>
+    </div>
+
+    <!-- SHT31 — green when sensor OK, red on fault -->
+    <div id="shtBox" class="border border-gray-700 rounded-lg p-3 bg-gray-900 flex items-center gap-3 transition-all duration-500">
+      <div id="shtDot" class="w-3 h-3 rounded-full bg-gray-600 flex-shrink-0"></div>
+      <div class="min-w-0">
+        <div class="text-xs text-gray-500 uppercase tracking-widest">SHT31</div>
+        <div id="shtLabel" class="text-sm font-bold text-gray-400 truncate">--</div>
+        <div id="shtSub" class="text-xs text-gray-600 truncate">temp / humidity</div>
+      </div>
+    </div>
+
+    <!-- PMS7003 — green when online AND all particle bins within ISO 6, red if exceeded -->
+    <div id="pmsBox" class="border border-gray-700 rounded-lg p-3 bg-gray-900 flex items-center gap-3 transition-all duration-500">
+      <div id="pmsDot" class="w-3 h-3 rounded-full bg-gray-600 flex-shrink-0"></div>
+      <div class="min-w-0">
+        <div class="text-xs text-gray-500 uppercase tracking-widest">PMS7003</div>
+        <div id="pmsLabel" class="text-sm font-bold text-gray-400 truncate">--</div>
+        <div id="pmsSub" class="text-xs text-gray-600 truncate">particles</div>
+      </div>
+    </div>
+
+    <!-- MPXV7002DP — green when ≥25 Pa (ISO 6 compliant), yellow 15-24, red <15 -->
+    <div id="pressBox" class="border border-gray-700 rounded-lg p-3 bg-gray-900 flex items-center gap-3 transition-all duration-500">
+      <div id="pressDot" class="w-3 h-3 rounded-full bg-gray-600 flex-shrink-0"></div>
+      <div class="min-w-0">
+        <div class="text-xs text-gray-500 uppercase tracking-widest">MPXV7002DP</div>
+        <div id="pressLabel" class="text-sm font-bold text-gray-400 truncate">--</div>
+        <div id="pressSub" class="text-xs text-gray-600 truncate">pressure</div>
+      </div>
+    </div>
+
+    <!-- Frames / uptime -->
+    <div class="border border-gray-700 rounded-lg p-3 bg-gray-900 flex items-center justify-between">
+      <div>
+        <div class="text-xs text-gray-500">frames rx</div>
+        <div id="framesValue" class="text-sm text-gray-300 tabular-nums">0</div>
+      </div>
+      <div class="text-right">
+        <div class="text-xs text-gray-500">uptime</div>
+        <div id="uptime" class="text-sm text-gray-300 tabular-nums">--</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ── Main grid ── -->
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+
+    <!-- Left: env + pressure + particles -->
+    <div class="lg:col-span-2 space-y-4">
+
+      <!-- Environment + Pressure row -->
+      <div class="border border-gray-700 rounded-lg p-4 bg-gray-900">
+        <div class="text-xs text-gray-500 uppercase tracking-widest mb-3">environment</div>
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+
+          <div class="border border-gray-700 rounded-lg p-3 bg-black text-center">
+            <div class="text-xs text-gray-500 mb-1">temperature (°C)</div>
+            <div id="tempValue" class="text-4xl font-bold my-1">--</div>
+            <div id="tempStatus" class="text-xs text-gray-600">--</div>
+            <div class="chart-container mt-2"><canvas id="tempChart"></canvas></div>
+          </div>
+
+          <div class="border border-gray-700 rounded-lg p-3 bg-black text-center">
+            <div class="text-xs text-gray-500 mb-1">humidity (%RH)</div>
+            <div id="humValue" class="text-4xl font-bold my-1">--</div>
+            <div id="humStatus" class="text-xs text-gray-600">--</div>
+            <div class="chart-container mt-2"><canvas id="humChart"></canvas></div>
+          </div>
+
+          <!-- Pressure tile -->
+          <div class="border border-gray-700 rounded-lg p-3 bg-black text-center col-span-2 md:col-span-1">
+            <div class="text-xs text-gray-500 mb-1">differential pressure (Pa)</div>
+            <div id="pressValue" class="text-4xl font-bold my-1">--</div>
+            <div id="pressStatus" class="text-xs text-gray-600 mb-1">--</div>
+            <!-- Target indicator bar: negative → red, 0-5 → yellow, >5 → green -->
+            <div class="w-full bg-gray-800 rounded-full h-2 mb-1">
+              <div id="pressBar" class="h-2 rounded-full transition-all duration-500 bg-gray-600" style="width:50%"></div>
+            </div>
+            <div class="flex justify-between text-xs text-gray-700">
+              <span>−</span><span>0 Pa</span><span>+</span>
+            </div>
+            <div class="chart-container mt-2"><canvas id="pressChart"></canvas></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Particle count charts -->
+      <div class="border border-gray-700 rounded-lg p-4 bg-gray-900">
+        <div class="text-xs text-gray-500 uppercase tracking-widest mb-3">particle counts — live (#/0.1L) vs ISO 6 limits</div>
+        <div class="grid grid-cols-3 gap-3">
+
+          <div class="border border-gray-700 rounded-lg p-3 bg-black text-center">
+            <div class="text-xs text-gray-500 mb-1">≥0.3µm <span class="text-gray-700">lim: 10.2/0.1L</span></div>
+            <div id="n03ChartVal" class="text-2xl font-bold my-1">--</div>
+            <div id="n03ChartStatus" class="text-xs text-gray-600">--</div>
+            <div class="chart-container"><canvas id="n03Chart"></canvas></div>
+          </div>
+
+          <div class="border border-gray-700 rounded-lg p-3 bg-black text-center">
+            <div class="text-xs text-gray-500 mb-1">≥0.5µm <span class="text-gray-700">lim: 3.52/0.1L</span></div>
+            <div id="n05ChartVal" class="text-2xl font-bold my-1">--</div>
+            <div id="n05ChartStatus" class="text-xs text-gray-600">--</div>
+            <div class="chart-container"><canvas id="n05Chart"></canvas></div>
+          </div>
+
+          <div class="border border-gray-700 rounded-lg p-3 bg-black text-center">
+            <div class="text-xs text-gray-500 mb-1">≥1.0µm <span class="text-gray-700">lim: 0.832/0.1L</span></div>
+            <div id="n10ChartVal" class="text-2xl font-bold my-1">--</div>
+            <div id="n10ChartStatus" class="text-xs text-gray-600">--</div>
+            <div class="chart-container"><canvas id="n10Chart"></canvas></div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Air Quality Health -->
+      <div class="border border-gray-700 rounded-lg p-4 bg-gray-900">
+        <div class="text-xs text-gray-500 uppercase tracking-widest mb-4">air quality health</div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+          <!-- Traffic light -->
+          <div class="border border-gray-700 rounded-lg p-4 bg-black flex items-center gap-5">
+            <div class="flex flex-col items-center gap-2 bg-gray-900 border border-gray-700 rounded-lg p-3">
+              <div id="tlRed"    class="tl-light tl-off"></div>
+              <div id="tlYellow" class="tl-light tl-off"></div>
+              <div id="tlGreen"  class="tl-light tl-off"></div>
+            </div>
+            <div>
+              <div class="text-xs text-gray-500 uppercase tracking-widest mb-1">ISO air quality</div>
+              <div id="tlLabel"  class="text-xl font-bold text-gray-400">--</div>
+              <div id="tlDetail" class="text-xs text-gray-600 mt-1 max-w-xs">waiting for data…</div>
+            </div>
+          </div>
+
+          <!-- ISO trend risk -->
+          <div class="border border-gray-700 rounded-lg p-4 bg-black">
+            <div class="text-xs text-gray-500 uppercase tracking-widest mb-3">ISO trend risk</div>
+            <div class="flex items-end gap-3 mb-1">
+              <div id="isoRiskValue" class="text-4xl font-bold">--</div>
+              <div id="isoRiskLabel" class="text-sm text-gray-500 mb-1">--</div>
+            </div>
+            <div id="isoRiskDetail" class="text-xs text-gray-600 mb-2">waiting for particle data…</div>
+            <div class="w-full h-3 rounded-full overflow-hidden bg-gray-800">
+              <div id="isoRiskBar" class="h-3 rounded-full transition-all duration-700 bg-green-500" style="width:0%"></div>
+            </div>
+            <div class="flex justify-between text-xs text-gray-600 mt-1">
+              <span>0%</span><span>50%</span><span>80%</span><span>100%</span>
+            </div>
+          </div>
+
+        </div>
+
+        <!-- Particle count grid -->
+        <div class="mt-4">
+          <div class="text-xs text-gray-500 uppercase tracking-widest mb-3">particle counts (#/0.1L)</div>
+          <div class="grid grid-cols-3 md:grid-cols-6 gap-2">
+            <div class="pc-cell" id="pc-n03"><div class="text-xs text-gray-500 mb-1">≥0.3µm</div><div id="n03Value" class="text-lg font-bold text-gray-200">--</div><div class="text-xs text-gray-600 mt-0.5">fine</div></div>
+            <div class="pc-cell" id="pc-n05"><div class="text-xs text-gray-500 mb-1">≥0.5µm</div><div id="n05Value" class="text-lg font-bold text-gray-200">--</div><div class="text-xs text-gray-600 mt-0.5">fine</div></div>
+            <div class="pc-cell" id="pc-n10"><div class="text-xs text-gray-500 mb-1">≥1.0µm</div><div id="n10Value" class="text-lg font-bold text-gray-200">--</div><div class="text-xs text-gray-600 mt-0.5">medium</div></div>
+            <div class="pc-cell" id="pc-n25"><div class="text-xs text-gray-500 mb-1">≥2.5µm</div><div id="n25Value" class="text-lg font-bold text-gray-200">--</div><div class="text-xs text-gray-600 mt-0.5">medium</div></div>
+            <div class="pc-cell" id="pc-n50"><div class="text-xs text-gray-500 mb-1">≥5.0µm</div><div id="n50Value" class="text-lg font-bold text-gray-200">--</div><div class="text-xs text-gray-600 mt-0.5">coarse</div></div>
+            <div class="pc-cell" id="pc-n100"><div class="text-xs text-gray-500 mb-1">≥10µm</div><div id="n100Value" class="text-lg font-bold text-gray-200">--</div><div class="text-xs text-gray-600 mt-0.5">coarse</div></div>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- Right panel -->
+    <div class="space-y-4">
+
+      <div id="sysBox" class="border border-green-700 rounded-lg p-3 bg-gray-900 glow-green text-center">
+        <div class="text-xs text-gray-500 mb-1">system</div>
+        <div id="sysStatus" class="text-green-400 font-bold">STANDBY</div>
+      </div>
+
+      <button id="btnToggleDebug"
+        class="w-full border border-gray-700 text-gray-400 py-2 px-3 rounded hover:border-gray-500 hover:text-gray-200 transition-all text-xs uppercase tracking-widest">
+        show debug view
+      </button>
+
+      <div id="debugPanel" class="border border-gray-700 rounded-lg p-4 bg-gray-900 hidden">
+        <div class="text-xs text-gray-500 uppercase tracking-widest mb-3">sensor debug</div>
+        <div class="space-y-2 text-xs">
+          <div class="flex justify-between"><span class="text-gray-500">PMS frames rx</span><span id="dbgFrames" class="text-gray-300 tabular-nums">0</span></div>
+          <div class="flex justify-between"><span class="text-gray-500">PMS bytes rx</span><span id="dbgBytes" class="text-gray-300 tabular-nums">0</span></div>
+          <div class="flex justify-between"><span class="text-gray-500">pressure raw (Pa)</span><span id="dbgPressRaw" class="text-gray-300 tabular-nums">--</span></div>
+          <div class="flex justify-between"><span class="text-gray-500">ok_press</span><span id="dbgOkPress" class="text-gray-300 tabular-nums">--</span></div>
+          <div class="flex justify-between"><span class="text-gray-500">msgs parsed</span><span id="msgCount" class="text-gray-300 tabular-nums">0</span></div>
+          <div class="flex justify-between"><span class="text-gray-500">last update</span><span id="updateTime" class="text-gray-300 tabular-nums">--</span></div>
+          <div class="flex justify-between"><span class="text-gray-500">port</span><span id="portLabel" class="text-gray-300">--</span></div>
+        </div>
+      </div>
+
+      <!-- Pressure detail card -->
+      <div class="border border-gray-700 rounded-lg p-4 bg-gray-900">
+        <div class="text-xs text-gray-500 uppercase tracking-widest mb-3">differential pressure</div>
+        <div class="text-xs text-gray-600 mb-3">MPXV7002DP · ISO 6 target: ≥25 Pa · warning: &lt;15 Pa</div>
+        <div class="space-y-2 text-xs">
+
+          <div class="flex justify-between mb-1">
+            <span class="text-gray-400">current</span>
+            <span id="pressDetailVal" class="text-white font-bold tabular-nums">-- Pa</span>
+          </div>
+          <!-- Centered gauge bar: left=negative, center=0, right=positive -->
+          <div class="relative w-full h-3 bg-gray-800 rounded-full overflow-hidden">
+            <!-- center line -->
+            <div class="absolute left-1/2 top-0 w-px h-full bg-gray-600"></div>
+            <div id="pressGaugeBar" class="absolute top-0 h-full rounded-full transition-all duration-500 bg-green-500" style="left:50%;width:0%"></div>
+          </div>
+          <div class="flex justify-between text-gray-700">
+            <span>−2 kPa</span><span>0</span><span>+2 kPa</span>
+          </div>
+
+          <div class="pt-2 border-t border-gray-800 space-y-1">
+            <div class="flex justify-between"><span class="text-gray-500">status</span><span id="pressDetailStatus" class="font-bold">--</span></div>
+            <div class="flex justify-between"><span class="text-gray-500">min (session)</span><span id="pressMin" class="text-gray-300 tabular-nums">--</span></div>
+            <div class="flex justify-between"><span class="text-gray-500">max (session)</span><span id="pressMax" class="text-gray-300 tabular-nums">--</span></div>
+            <div class="flex justify-between"><span class="text-gray-500">avg (60s)</span><span id="pressAvg" class="text-gray-300 tabular-nums">--</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ISO limits sidebar -->
+      <div class="border border-gray-700 rounded-lg p-4 bg-gray-900">
+        <div class="text-xs text-gray-500 uppercase tracking-widest mb-1">ISO 6 limits (particles/m³)</div>
+        <div class="text-xs text-gray-600 mb-3">readings × 10,000 to convert /0.1L → /m³</div>
+        <div class="space-y-2">
+          <div>
+            <div class="flex justify-between text-xs mb-1"><span class="text-gray-400">≥0.3µm</span><span><span id="iso03Val" class="text-white font-bold">--</span><span class="text-gray-600"> / 102,000</span></span></div>
+            <div class="w-full bg-gray-800 rounded-full h-1.5"><div id="iso03Bar" class="bg-green-500 h-1.5 rounded-full transition-all duration-500" style="width:0%"></div></div>
+          </div>
+          <div>
+            <div class="flex justify-between text-xs mb-1"><span class="text-gray-400">≥0.5µm</span><span><span id="iso05Val" class="text-white font-bold">--</span><span class="text-gray-600"> / 35,200</span></span></div>
+            <div class="w-full bg-gray-800 rounded-full h-1.5"><div id="iso05Bar" class="bg-green-500 h-1.5 rounded-full transition-all duration-500" style="width:0%"></div></div>
+          </div>
+          <div>
+            <div class="flex justify-between text-xs mb-1"><span class="text-gray-400">≥1.0µm</span><span><span id="iso10Val" class="text-white font-bold">--</span><span class="text-gray-600"> / 8,320</span></span></div>
+            <div class="w-full bg-gray-800 rounded-full h-1.5"><div id="iso10Bar" class="bg-green-500 h-1.5 rounded-full transition-all duration-500" style="width:0%"></div></div>
+          </div>
+          <div>
+            <div class="flex justify-between text-xs mb-1"><span class="text-gray-400">≥5.0µm</span><span><span id="iso50Val" class="text-white font-bold">--</span><span class="text-gray-600"> / 293</span></span></div>
+            <div class="w-full bg-gray-800 rounded-full h-1.5"><div id="iso50Bar" class="bg-green-500 h-1.5 rounded-full transition-all duration-500" style="width:0%"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Event log -->
+      <div class="border border-gray-700 rounded-lg bg-gray-900">
+        <div class="flex justify-between items-center p-4 cursor-pointer select-none" id="logHeader">
+          <div class="text-xs text-gray-500 uppercase tracking-widest">event log</div>
+          <div class="flex items-center gap-3">
+            <button id="clearLogBtn" class="text-xs text-gray-600 hover:text-white transition-colors" onclick="event.stopPropagation()">clear</button>
+            <span id="logToggleIcon" class="text-gray-500 text-xs">▲</span>
+          </div>
+        </div>
+        <div id="logBody" class="px-4 pb-4">
+          <div id="eventLog" class="h-48 overflow-y-auto text-xs bg-black rounded p-2 space-y-0.5">
+            <div class="text-gray-600">system initialized…</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ── Control System ── -->
+  <div class="border border-gray-700 rounded-lg p-4 bg-gray-900">
+    <div class="flex items-center justify-between mb-3">
+      <div>
+        <div class="text-sm font-bold tracking-widest uppercase">Control System</div>
+        <div class="text-xs text-gray-500 mt-0.5">Uno R4 WiFi · WebSocket · Port 81</div>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="status-indicator status-offline" id="ctrlDot"></span>
+        <span id="ctrlStatus" class="text-xs text-gray-400">disconnected</span>
+      </div>
+    </div>
+
+    <!-- IP Connect row -->
+    <div class="flex items-center gap-2 mb-4">
+      <input id="ctrlIP" type="text" placeholder="192.168.x.x"
+        class="bg-gray-800 border border-gray-600 rounded px-3 py-1.5 text-sm text-white w-36 focus:outline-none focus:border-green-500"
+        value="">
+      <button id="btnCtrlConnect"
+        class="border border-green-500 text-green-500 py-1.5 px-3 rounded hover:bg-green-900/30 transition-all text-sm">
+        connect
+      </button>
+      <button id="btnCtrlDisconnect" disabled
+        class="border border-red-500 text-red-500 py-1.5 px-3 rounded hover:bg-red-900/30 transition-all text-sm opacity-40">
+        disconnect
+      </button>
+    </div>
+
+    <!-- Run / Abort buttons -->
+    <div class="flex gap-3 mb-4">
+      <button id="btnRun" disabled
+        class="flex-1 border border-green-500 text-green-500 py-2 px-4 rounded hover:bg-green-900/30 transition-all text-sm font-bold opacity-40">
+        RUN SEQUENCE
+      </button>
+      <button id="btnAbort" disabled
+        class="border border-red-500 text-red-500 py-2 px-4 rounded hover:bg-red-900/30 transition-all text-sm opacity-40">
+        ABORT
+      </button>
+      <button id="btnReset" disabled
+        class="border border-yellow-500 text-yellow-500 py-2 px-4 rounded hover:bg-yellow-900/30 transition-all text-sm opacity-40">
+        RESET
+      </button>
+    </div>
+
+    <!-- Progress -->
+    <div id="ctrlProgress" class="hidden mb-3">
+      <div class="text-xs text-gray-400 mb-1.5" id="ctrlStepLabel">── Waiting ──</div>
+      <div class="w-full bg-gray-800 rounded-full h-2">
+        <div id="ctrlBar" class="h-2 rounded-full bg-green-500 transition-all duration-500" style="width:0%"></div>
+      </div>
+    </div>
+
+    <!-- Last run status -->
+    <div class="text-xs text-gray-500" id="ctrlLastRun">No run recorded</div>
+  </div>
+
+</div>
+
+<!-- Web Serial not supported overlay -->
+<div id="noSerialOverlay"
+  class="hidden fixed inset-0 bg-black/95 z-50 flex flex-col items-center justify-center gap-4 text-center p-8">
+  <h2 class="text-2xl font-bold text-red-400">Web Serial Not Supported</h2>
+  <p class="text-gray-400 max-w-md">Open in <strong class="text-white">Google Chrome</strong> or <strong class="text-white">Microsoft Edge</strong>.</p>
+</div>
+
+<script>
+// ── Config ────────────────────────────────────────────────────────
+const CHART_POINTS = 60;
+const ENV = {
+  // tMin/tMax = nominal ISO 6 target band  → shows "nominal" (green)
+  // min/max   = acceptable warning band    → shows "warning" (yellow)
+  // outside min/max                        → shows "ALERT"   (red)
+  temp: { min:15, max:30, tMin:20, tMax:22 },  // °C
+  hum:  { min:20, max:60, tMin:30, tMax:50 },  // %RH
+};
+// ISO 14644-1 Class 6 limits (particles/m³)
+// PMS7003 reports /0.1L → multiply × 10,000 to get /m³
+const ISO_LIMITS = {
+  n03: 102000,  // ≥0.3µm → 102,000 /m³  (ISO 6)
+  n05:  35200,  // ≥0.5µm →  35,200 /m³  (ISO 6) ← primary compliance bin
+  n10:   8320,  // ≥1.0µm →   8,320 /m³  (ISO 6)
+  n50:    293,  // ≥5.0µm →     293 /m³  (ISO 6)
+};
+// MPXV7002DP: ISO 6 positive pressure thresholds (ISPE guidelines)
+//   >= 25 Pa  → ISO 6 COMPLIANT
+//   15–24 Pa  → WARNING — low positive pressure
+//   < 15 Pa   → CRITICAL / negative
+const PRESS_TARGET_PA = 25.0;   // ISO 6 compliant threshold
+const PRESS_WARN_PA   = 15.0;   // Warning threshold
+const PRESS_MAX_PA    = 2000.0; // sensor max ±2 kPa = 2000 Pa
+
+function toM3(per01L) { return per01L * 10000; }
+
+// ── State ─────────────────────────────────────────────────────────
+let port=null, reader=null, keepReading=false;
+let lineBuf='', msgCount=0, startMs=null, synced=false;
+let debugVisible=false;
+const charts={};
+
+// Pressure history for min/max/avg
+let pressHistory=[];
+let pressSessionMin=null, pressSessionMax=null;
+
+// ── Log ───────────────────────────────────────────────────────────
+function logEvent(msg, type='info') {
+  const c={info:'text-gray-500',success:'text-green-400',warning:'text-yellow-400',error:'text-red-400'};
+  const el=document.createElement('div');
+  el.className=c[type]||c.info;
+  el.textContent=`[${new Date().toLocaleTimeString()}] ${msg}`;
+  const box=document.getElementById('eventLog');
+  box.insertBefore(el,box.firstChild);
+  while(box.children.length>100) box.removeChild(box.lastChild);
+}
+
+// ── Debug toggle ──────────────────────────────────────────────────
+function setDebugView(show) {
+  debugVisible=!!show;
+  document.getElementById('debugPanel').classList.toggle('hidden',!debugVisible);
+  document.getElementById('btnToggleDebug').textContent=debugVisible?'hide debug view':'show debug view';
+}
+
+// ── Connection UI ─────────────────────────────────────────────────
+function setConn(label, type) {
+  const dot=document.getElementById('connDot');
+  const lbl=document.getElementById('connLabel');
+  const box=document.getElementById('connBox');
+  const map={ok:'status-ok',error:'status-error',offline:'status-offline'};
+  dot.className=`status-indicator ${map[type]||'status-offline'}`+(type==='ok'?' pulse-green':'');
+  lbl.textContent=label;
+  lbl.className=type==='ok'?'text-sm text-green-400':type==='error'?'text-sm text-red-400':'text-sm text-gray-400';
+  box.className=`border rounded-lg p-3 bg-gray-900 flex items-center gap-2 ${
+    type==='ok'?'border-green-600 glow-green':type==='error'?'border-red-600 glow-red':'border-gray-700'}`;
+}
+
+// ── Uptime ────────────────────────────────────────────────────────
+function tickUptime() {
+  if(!startMs) return;
+  const s=Math.floor((Date.now()-startMs)/1000);
+  const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60;
+  document.getElementById('uptime').textContent=h>0?`${h}h ${m}m`:m>0?`${m}m ${sec}s`:`${sec}s`;
+}
+
+// ── Charts ────────────────────────────────────────────────────────
+function initCharts() {
+  const base={
+    responsive:true,maintainAspectRatio:false,animation:false,
+    plugins:{legend:{display:false}},
+    elements:{point:{radius:0},line:{tension:0.3}},
+    scales:{
+      x:{display:false},
+      y:{display:true,grid:{color:'#1f2937'},ticks:{color:'#6b7280',font:{size:9}}}
+    }
+  };
+  const mk=(id,color,yMin,yMax)=>new Chart(document.getElementById(id),{
+    type:'line',
+    data:{labels:Array(CHART_POINTS).fill(''),
+      datasets:[{data:Array(CHART_POINTS).fill(null),borderColor:color,borderWidth:1.5,fill:false}]},
+    options:{...base,scales:{...base.scales,y:{...base.scales.y,min:yMin,max:yMax}}}
+  });
+  charts.temp  = mk('tempChart',  '#48bb78',  10,  40);
+  charts.hum   = mk('humChart',   '#4299e1',  10, 100);
+  charts.press = mk('pressChart', '#a78bfa', -50, 100);  // Pa range
+  charts.n03   = mk('n03Chart',   '#9f7aea',   0,  20);
+  charts.n05   = mk('n05Chart',   '#f56565',   0,  15);
+  charts.n10   = mk('n10Chart',   '#ed8936',   0,   5);
+}
+
+function push(chart, v) {
+  if(!chart||v==null) return;
+  chart.data.datasets[0].data.shift();
+  chart.data.datasets[0].data.push(v);
+  chart.update('none');
+}
+
+// ── Metric status ─────────────────────────────────────────────────
+function metricStatus(elId, v, cfg) {
+  const el=document.getElementById(elId);
+  if(v==null){el.textContent='--';el.className='text-xs text-gray-600';return;}
+  if(v>=cfg.tMin&&v<=cfg.tMax){el.textContent='nominal';el.className='text-xs text-green-500';}
+  else if(v>=cfg.min&&v<=cfg.max){el.textContent='warning';el.className='text-xs text-yellow-400';}
+  else{el.textContent='ALERT';el.className='text-xs text-red-400 blink';}
+}
+
+// ── Status box helper ─────────────────────────────────────────────
+// state: 'ok' | 'warn' | 'fail' | 'offline'
+// Colours the entire card border + glow + dot + label for at-a-glance ISO compliance.
+function updateStatusBox(boxId, dotId, labelId, subId, state, labelText, subText) {
+  const box = document.getElementById(boxId);
+  const dot = document.getElementById(dotId);
+  const lbl = document.getElementById(labelId);
+  const sub = subId ? document.getElementById(subId) : null;
+  const styles = {
+    ok:      { box: 'border border-green-600 glow-green',       dot: 'w-3 h-3 rounded-full bg-green-500 flex-shrink-0',  lbl: 'text-sm font-bold text-green-400 truncate' },
+    warn:    { box: 'border border-yellow-600 glow-yellow',     dot: 'w-3 h-3 rounded-full bg-yellow-400 flex-shrink-0', lbl: 'text-sm font-bold text-yellow-400 truncate' },
+    fail:    { box: 'border border-red-600 glow-red pulse-red', dot: 'w-3 h-3 rounded-full bg-red-500 flex-shrink-0',    lbl: 'text-sm font-bold text-red-400 truncate' },
+    offline: { box: 'border border-gray-700',                   dot: 'w-3 h-3 rounded-full bg-gray-600 flex-shrink-0',  lbl: 'text-sm font-bold text-gray-400 truncate' },
+  };
+  const s = styles[state] || styles.offline;
+  box.className = `rounded-lg p-3 bg-gray-900 flex items-center gap-3 transition-all duration-500 ${s.box}`;
+  dot.className = s.dot;
+  lbl.textContent = labelText;
+  lbl.className = s.lbl;
+  if(sub && subText !== undefined) sub.textContent = subText;
+}
+
+// ── Pressure update ───────────────────────────────────────────────
+function updatePressure(pa) {
+  if(pa==null) return;
+
+  // Session min/max
+  if(pressSessionMin===null||pa<pressSessionMin) pressSessionMin=pa;
+  if(pressSessionMax===null||pa>pressSessionMax) pressSessionMax=pa;
+
+  // 60-point rolling history for avg
+  pressHistory.push(pa);
+  if(pressHistory.length>60) pressHistory.shift();
+  const avg=pressHistory.reduce((a,b)=>a+b,0)/pressHistory.length;
+
+  // Main tile
+  document.getElementById('pressValue').textContent=pa.toFixed(1);
+  document.getElementById('pressDetailVal').textContent=pa.toFixed(2)+' Pa';
+  document.getElementById('pressMin').textContent=pressSessionMin.toFixed(1)+' Pa';
+  document.getElementById('pressMax').textContent=pressSessionMax.toFixed(1)+' Pa';
+  document.getElementById('pressAvg').textContent=avg.toFixed(1)+' Pa';
+
+  // Status — 3-tier ISO 6 thresholds matching Arduino Serial Monitor output
+  let statusText, statusClass, barColor;
+  if(pa >= PRESS_TARGET_PA){
+    statusText='ISO 6 COMPLIANT ✓'; statusClass='text-green-400'; barColor='bg-green-500';
+  } else if(pa >= PRESS_WARN_PA){
+    statusText='WARNING — LOW PRESSURE'; statusClass='text-yellow-400'; barColor='bg-yellow-500';
+  } else {
+    statusText='CRITICAL — ISO 6 FAILED'; statusClass='text-red-400 blink'; barColor='bg-red-500';
+  }
+
+  document.getElementById('pressStatus').textContent=statusText;
+  document.getElementById('pressStatus').className=`text-xs font-bold ${statusClass}`;
+  document.getElementById('pressDetailStatus').textContent=statusText;
+  document.getElementById('pressDetailStatus').className=`font-bold ${statusClass}`;
+
+  // Small bar in tile (0–100 Pa range shown as 0–100%)
+  const tilePct=Math.min(100,Math.max(0,(pa/100)*100));
+  const tileBar=document.getElementById('pressBar');
+  tileBar.style.width=tilePct+'%';
+  tileBar.className=`h-2 rounded-full transition-all duration-500 ${barColor}`;
+
+  // Centered gauge in detail card (−2000 to +2000 Pa → 0–100%, center=50%)
+  const gaugePct=Math.min(100,Math.max(0,((pa+PRESS_MAX_PA)/(PRESS_MAX_PA*2))*100));
+  const gaugeBar=document.getElementById('pressGaugeBar');
+  const halfWidth=Math.abs(gaugePct-50);
+  gaugeBar.style.left=(pa>=0?'50%':`${gaugePct}%`);
+  gaugeBar.style.width=halfWidth+'%';
+  gaugeBar.className=`absolute top-0 h-full rounded-full transition-all duration-500 ${barColor}`;
+
+  // Status box in header — full ISO 6 three-tier coloring
+  const pressState = pa>=PRESS_TARGET_PA ? 'ok' : pa>=PRESS_WARN_PA ? 'warn' : 'fail';
+  const pressBoxLabel = pa>=PRESS_TARGET_PA ? 'ISO 6 OK' : pa>=PRESS_WARN_PA ? 'LOW PRESSURE' : 'CRITICAL';
+  updateStatusBox('pressBox','pressDot','pressLabel','pressSub', pressState, pressBoxLabel, pa.toFixed(1)+' Pa');
+
+  // Log alert when below warning threshold
+  if(pa < PRESS_WARN_PA) logEvent(`Low pressure: ${pa.toFixed(1)} Pa — ISO 6 requires ≥25 Pa`,'warning');
+
+  // Debug
+  document.getElementById('dbgPressRaw').textContent=pa.toFixed(2)+' Pa';
+  document.getElementById('dbgOkPress').textContent=pa>=PRESS_TARGET_PA?'true':'false';
+
+  push(charts.press, pa);
+}
+
+// ── ISO risk card ─────────────────────────────────────────────────
+function updateISORisk(d) {
+  const valueEl=document.getElementById('isoRiskValue');
+  const labelEl=document.getElementById('isoRiskLabel');
+  const detailEl=document.getElementById('isoRiskDetail');
+  const barEl=document.getElementById('isoRiskBar');
+
+  if(!d.ok_pms) {
+    valueEl.textContent='--'; labelEl.textContent='--';
+    detailEl.textContent='waiting for particle data…';
+    barEl.style.width='0%'; barEl.className='h-3 rounded-full transition-all duration-700 bg-green-500';
+    return;
+  }
+
+  const bins=[
+    {key:'n03',name:'≥0.3µm',limit:ISO_LIMITS.n03,value:toM3(d.n03||0)},
+    {key:'n05',name:'≥0.5µm',limit:ISO_LIMITS.n05,value:toM3(d.n05||0)},
+    {key:'n10',name:'≥1.0µm',limit:ISO_LIMITS.n10,value:toM3(d.n10||0)},
+    {key:'n50',name:'≥5.0µm',limit:ISO_LIMITS.n50,value:toM3(d.n50||0)},
+  ];
+  const worst=bins.reduce((a,b)=>((b.value/b.limit)>(a.value/a.limit)?b:a));
+  const pct=Math.min(110,Math.round((worst.value/worst.limit)*100));
+
+  valueEl.textContent=pct+'%';
+  valueEl.className=`text-4xl font-bold ${pct>100?'text-red-400':pct>80?'text-yellow-400':'text-green-400'}`;
+  labelEl.textContent=worst.name;
+  detailEl.textContent=`Worst channel: ${worst.name} at ${worst.value.toLocaleString()} / ${worst.limit.toLocaleString()} /m³`;
+  barEl.style.width=Math.min(100,pct)+'%';
+  barEl.className=`h-3 rounded-full transition-all duration-700 ${pct>100?'bg-red-500':pct>80?'bg-yellow-500':'bg-green-500'}`;
+}
+
+// ── Traffic light ─────────────────────────────────────────────────
+function updateTrafficLight(d) {
+  const r=document.getElementById('tlRed');
+  const y=document.getElementById('tlYellow');
+  const g=document.getElementById('tlGreen');
+  const lbl=document.getElementById('tlLabel');
+  const det=document.getElementById('tlDetail');
+
+  r.className='tl-light tl-off';
+  y.className='tl-light tl-off';
+  g.className='tl-light tl-off';
+
+  if(!d.ok_pms) {
+    lbl.textContent='--'; lbl.className='text-xl font-bold text-gray-500';
+    det.textContent='waiting for PMS7003 data…'; return;
+  }
+
+  const m3={
+    n03:toM3(d.n03||0), n05:toM3(d.n05||0),
+    n10:toM3(d.n10||0), n50:toM3(d.n50||0),
+  };
+
+  const over03=m3.n03>ISO_LIMITS.n03, over05=m3.n05>ISO_LIMITS.n05;
+  const over10=m3.n10>ISO_LIMITS.n10, over50=m3.n50>ISO_LIMITS.n50;
+  const warn03=m3.n03>ISO_LIMITS.n03*.8, warn05=m3.n05>ISO_LIMITS.n05*.8;
+  const warn10=m3.n10>ISO_LIMITS.n10*.8, warn50=m3.n50>ISO_LIMITS.n50*.8;
+
+  const anyExceeded=over03||over05||over10||over50;
+  const anyWarning=warn03||warn05||warn10||warn50;
+
+  const overBins=[];
+  if(over03) overBins.push('≥0.3µm');
+  if(over05) overBins.push('≥0.5µm');
+  if(over10) overBins.push('≥1.0µm');
+  if(over50) overBins.push('≥5.0µm');
+
+  if(anyExceeded) {
+    r.className='tl-light tl-red-on pulse-red';
+    lbl.textContent='NON-COMPLIANT'; lbl.className='text-xl font-bold text-red-400';
+    det.textContent=`ISO-6 exceeded: ${overBins.join(', ')}.`;
+  } else if(anyWarning) {
+    y.className='tl-light tl-yellow-on';
+    lbl.textContent='CAUTION'; lbl.className='text-xl font-bold text-yellow-400';
+    det.textContent='Approaching ISO-6 limits (>80%). Monitor closely.';
+  } else {
+    g.className='tl-light tl-green-on';
+    lbl.textContent='ISO-6 COMPLIANT'; lbl.className='text-xl font-bold text-green-400';
+    det.textContent='All bins within ISO 14644-1 Class 6 limits.';
+  }
+}
+
+// ── ISO bars ──────────────────────────────────────────────────────
+function updateISO(d) {
+  const upd=(valId,barId,rawVal,limitM3)=>{
+    const m3val=toM3(rawVal||0);
+    const pct=Math.min(110,(m3val/limitM3)*100);
+    document.getElementById(valId).textContent=m3val.toLocaleString();
+    const bar=document.getElementById(barId);
+    bar.style.width=Math.min(100,pct)+'%';
+    bar.className=`h-1.5 rounded-full transition-all duration-500 ${pct>100?'bg-red-500':pct>80?'bg-yellow-500':'bg-green-500'}`;
+  };
+  upd('iso03Val','iso03Bar',d.n03,ISO_LIMITS.n03);
+  upd('iso05Val','iso05Bar',d.n05,ISO_LIMITS.n05);
+  upd('iso10Val','iso10Bar',d.n10,ISO_LIMITS.n10);
+  upd('iso50Val','iso50Bar',d.n50,ISO_LIMITS.n50);
+}
+
+// ── Particle cell coloring ────────────────────────────────────────
+function colorPC(id,val,warn,hot) {
+  const el=document.getElementById(id);
+  el.classList.remove('hot','warm');
+  if(val>hot) el.classList.add('hot');
+  else if(val>warn) el.classList.add('warm');
+}
+
+// ── Main dashboard update ─────────────────────────────────────────
+function updateDashboard(d) {
+  if(d.time) {
+    document.getElementById('clockValue').textContent=d.time;
+    document.getElementById('updateTime').textContent=d.time;
+  }
+  if(d.synced&&!synced) {
+    synced=true;
+    document.getElementById('syncBadge').textContent='synced ✓';
+    document.getElementById('syncBadge').className='text-green-500';
+  }
+
+  // PMS7003 — green = online & all bins within ISO 6
+  //           yellow = warming up (no frames yet)
+  //           red = online but ≥1 bin exceeds ISO 6 limit
+  let pmsState, pmsLabel, pmsSub;
+  if(!d.ok_pms) {
+    pmsState='warn'; pmsLabel='WARMING UP'; pmsSub='waiting for frames…';
+  } else {
+    const anyOver = [
+      toM3(d.n03||0) > ISO_LIMITS.n03,
+      toM3(d.n05||0) > ISO_LIMITS.n05,
+      toM3(d.n10||0) > ISO_LIMITS.n10,
+      toM3(d.n50||0) > ISO_LIMITS.n50,
+    ].some(Boolean);
+    pmsState  = anyOver ? 'fail' : 'ok';
+    pmsLabel  = anyOver ? 'OVER LIMIT' : 'ISO 6 OK';
+    pmsSub    = anyOver ? 'particle limit exceeded' : `${d.frames||0} frames rx`;
+  }
+  updateStatusBox('pmsBox','pmsDot','pmsLabel','pmsSub', pmsState, pmsLabel, pmsSub);
+
+  // Debug
+  document.getElementById('dbgFrames').textContent=d.frames||0;
+  document.getElementById('dbgBytes').textContent=d.bytes||0;
+  document.getElementById('framesValue').textContent=d.frames||0;
+
+  // Temperature
+  const t=d.temp??null;
+  document.getElementById('tempValue').textContent=t!=null?t.toFixed(1):'--';
+  metricStatus('tempStatus',t,ENV.temp);
+  push(charts.temp,t);
+
+  // Humidity
+  const h=d.hum??null;
+  document.getElementById('humValue').textContent=h!=null?h.toFixed(1):'--';
+  metricStatus('humStatus',h,ENV.hum);
+  push(charts.hum,h);
+
+  // ── SHT31 status box — reflects sensor fault OR out-of-range temp/humidity ──
+  // Priority: I2C fault > temp/hum alert (outside min/max) > temp/hum warning > OK
+  {
+    const tempAlert = t!=null && (t<ENV.temp.min || t>ENV.temp.max);
+    const humAlert  = h!=null && (h<ENV.hum.min  || h>ENV.hum.max);
+    const tempWarn  = t!=null && (t<ENV.temp.tMin || t>ENV.temp.tMax);
+    const humWarn   = h!=null && (h<ENV.hum.tMin  || h>ENV.hum.tMax);
+
+    let shtState, shtLabel, shtSub;
+    if(!d.ok_sht) {
+      shtState='fail'; shtLabel='FAULT'; shtSub='I2C error';
+    } else if(tempAlert || humAlert) {
+      const who = [tempAlert?'temp':'', humAlert?'humidity':''].filter(Boolean).join(' & ');
+      shtState='fail'; shtLabel='NON-COMPLIANT'; shtSub=`${who} out of ISO 6 range`;
+    } else if(tempWarn || humWarn) {
+      const who = [tempWarn?'temp':'', humWarn?'humidity':''].filter(Boolean).join(' & ');
+      shtState='warn'; shtLabel='WARNING'; shtSub=`${who} outside nominal`;
+    } else {
+      shtState='ok'; shtLabel='ISO 6 OK'; shtSub='temp / humidity';
+    }
+    updateStatusBox('shtBox','shtDot','shtLabel','shtSub', shtState, shtLabel, shtSub);
+  }
+
+  // ── Pressure ──────────────────────────────────────────────────────
+  // Always present — MPXV7002DP is purely analog, no warmup needed
+  const pa = d.pressure_pa??null;
+  updatePressure(pa);
+
+  // ── Particles ─────────────────────────────────────────────────────
+  if(d.ok_pms) {
+    const n03=d.n03??0, n05=d.n05??0, n10=d.n10??0;
+
+    document.getElementById('n03ChartVal').textContent=n03;
+    document.getElementById('n05ChartVal').textContent=n05;
+    document.getElementById('n10ChartVal').textContent=n10;
+
+    // ISO 6 limits converted to /0.1L  (ISO_LIMITS /m³ ÷ 10,000)
+    const lim03=10.2, lim05=3.52, lim10=0.832;
+    const setCS=(id,val,lim)=>{
+      const el=document.getElementById(id);
+      const pct=(val/lim)*100;
+      el.textContent=pct>100?'OVER LIMIT':pct>80?'approaching':'within limit';
+      el.className=`text-xs font-bold ${pct>100?'text-red-400':pct>80?'text-yellow-400':'text-green-500'}`;
+    };
+    setCS('n03ChartStatus',n03,lim03);
+    setCS('n05ChartStatus',n05,lim05);
+    setCS('n10ChartStatus',n10,lim10);
+
+    push(charts.n03,n03);
+    push(charts.n05,n05);
+    push(charts.n10,n10);
+
+    document.getElementById('n03Value').textContent=d.n03??'--';
+    document.getElementById('n05Value').textContent=d.n05??'--';
+    document.getElementById('n10Value').textContent=d.n10??'--';
+    document.getElementById('n25Value').textContent=d.n25??'--';
+    document.getElementById('n50Value').textContent=d.n50??'--';
+    document.getElementById('n100Value').textContent=d.n100??'--';
+
+    colorPC('pc-n03',toM3(d.n03||0),ISO_LIMITS.n03*.8,ISO_LIMITS.n03);
+    colorPC('pc-n05',toM3(d.n05||0),ISO_LIMITS.n05*.8,ISO_LIMITS.n05);
+    colorPC('pc-n10',toM3(d.n10||0),ISO_LIMITS.n10*.8,ISO_LIMITS.n10);
+    colorPC('pc-n50',toM3(d.n50||0),ISO_LIMITS.n50*.8,ISO_LIMITS.n50);
+
+    updateTrafficLight(d);
+    updateISO(d);
+    updateISORisk(d);
+  } else {
+    updateTrafficLight(d);
+    updateISORisk(d);
+  }
+
+  msgCount++;
+  document.getElementById('msgCount').textContent=msgCount;
+}
+
+// ── Web Serial ────────────────────────────────────────────────────
+if(!('serial' in navigator)) {
+  document.getElementById('noSerialOverlay').classList.remove('hidden');
+}
+
+async function connect() {
+  try {
+    port=await navigator.serial.requestPort();
+    await port.open({baudRate:115200});
+    logEvent('Port opened at 115200 baud','success');
+    setConn('Arduino connected','ok');
+    document.getElementById('portLabel').textContent='active';
+    document.getElementById('btnConnect').disabled=true;
+    document.getElementById('btnConnect').classList.add('opacity-40');
+    document.getElementById('btnDisconnect').disabled=false;
+    document.getElementById('btnDisconnect').classList.remove('opacity-40');
+    document.getElementById('sysStatus').textContent='RUNNING';
+    document.getElementById('sysStatus').className='text-green-400 font-bold';
+    document.getElementById('sysBox').className='border border-green-700 rounded-lg p-3 bg-gray-900 glow-green text-center';
+    startMs=Date.now();
+    await sendTime();
+    keepReading=true;
+    readLoop();
+  } catch(e) {
+    logEvent('Connect failed: '+e.message,'error');
+    setConn('error','error');
+  }
+}
+
+async function disconnect() {
+  keepReading=false;
+  try{if(reader)await reader.cancel();}catch(_){}
+  try{if(port)await port.close();}catch(_){}
+  port=null; reader=null;
+  setConn('disconnected','offline');
+  document.getElementById('btnConnect').disabled=false;
+  document.getElementById('btnConnect').classList.remove('opacity-40');
+  document.getElementById('btnDisconnect').disabled=true;
+  document.getElementById('btnDisconnect').classList.add('opacity-40');
+  document.getElementById('sysStatus').textContent='STOPPED';
+  document.getElementById('sysStatus').className='text-yellow-400 font-bold';
+  document.getElementById('sysBox').className='border border-yellow-700 rounded-lg p-3 bg-gray-900 glow-yellow text-center';
+  logEvent('Disconnected','warning');
+}
+
+async function sendTime() {
+  if(!port?.writable) return;
+  try {
+    const w=port.writable.getWriter();
+    await w.write(new TextEncoder().encode(`T${Math.floor(Date.now()/1000)}\n`));
+    w.releaseLock();
+    synced=true;
+    document.getElementById('syncBadge').textContent='synced ✓';
+    document.getElementById('syncBadge').className='text-green-500';
+    logEvent('Time sync sent','success');
+  } catch(e){logEvent('Time sync failed: '+e.message,'error');}
+}
+
+async function readLoop() {
+  const decoder=new TextDecoderStream();
+  port.readable.pipeTo(decoder.writable);
+  reader=decoder.readable.getReader();
+  try {
+    while(keepReading) {
+      const {value,done}=await reader.read();
+      if(done) break;
+      lineBuf+=value;
+      let nl;
+      while((nl=lineBuf.indexOf('\n'))!==-1) {
+        const line=lineBuf.slice(0,nl).trim();
+        lineBuf=lineBuf.slice(nl+1);
+        if(line.startsWith('{')) {
+          try { updateDashboard(JSON.parse(line)); }
+          catch(_){ logEvent('parse error: '+line.slice(0,60),'warning'); }
+        }
+      }
+    }
+  } catch(e){
+    if(keepReading){logEvent('Read error: '+e.message,'error');setConn('read error','error');}
+  } finally { reader=null; }
+}
+
+// ── Buttons ───────────────────────────────────────────────────────
+document.getElementById('btnConnect').addEventListener('click',connect);
+document.getElementById('btnDisconnect').addEventListener('click',disconnect);
+document.getElementById('btnSyncTime').addEventListener('click',sendTime);
+document.getElementById('btnToggleDebug').addEventListener('click',()=>setDebugView(!debugVisible));
+document.getElementById('clearLogBtn').addEventListener('click',()=>{
+  document.getElementById('eventLog').innerHTML='<div class="text-gray-600">log cleared…</div>';
+});
+
+// ── Log toggle ────────────────────────────────────────────────────
+let logVisible = true;
+document.getElementById('logHeader').addEventListener('click', () => {
+  logVisible = !logVisible;
+  const body = document.getElementById('logBody');
+  const icon = document.getElementById('logToggleIcon');
+  body.style.display = logVisible ? '' : 'none';
+  icon.textContent = logVisible ? '▲' : '▼';
+});
+
+document.addEventListener('DOMContentLoaded',()=>{
+  setDebugView(false);
+  initCharts();
+  setInterval(tickUptime,1000);
+  logEvent('Dashboard ready — click "connect serial"','info');
+});
+
+// ── Control System WebSocket ──────────────────────────────────────
+let ctrlWS = null;
+
+const ctrlDot        = document.getElementById('ctrlDot');
+const ctrlStatus     = document.getElementById('ctrlStatus');
+const btnCtrlConnect = document.getElementById('btnCtrlConnect');
+const btnCtrlDisc    = document.getElementById('btnCtrlDisconnect');
+const btnRun         = document.getElementById('btnRun');
+const btnAbort       = document.getElementById('btnAbort');
+const btnReset       = document.getElementById('btnReset');
+const ctrlProgress   = document.getElementById('ctrlProgress');
+const ctrlStepLabel  = document.getElementById('ctrlStepLabel');
+const ctrlBar        = document.getElementById('ctrlBar');
+const ctrlLastRun    = document.getElementById('ctrlLastRun');
+const ctrlIPInput    = document.getElementById('ctrlIP');
+
+// Persist IP across reloads
+const savedIP = localStorage.getItem('ctrl_ip');
+if (savedIP) ctrlIPInput.value = savedIP;
+
+function ctrlSetConnected(connected) {
+  ctrlDot.className = 'status-indicator ' + (connected ? 'status-ok' : 'status-offline');
+  ctrlStatus.textContent = connected ? 'connected' : 'disconnected';
+  btnCtrlConnect.disabled = connected;
+  btnCtrlDisc.disabled    = !connected;
+  btnCtrlConnect.classList.toggle('opacity-40', connected);
+  btnCtrlDisc.classList.toggle('opacity-40', !connected);
+  btnRun.disabled   = !connected;
+  btnAbort.disabled = !connected;
+  btnRun.classList.toggle('opacity-40',   !connected);
+  btnAbort.classList.toggle('opacity-40', !connected);
+  btnReset.disabled = true;
+  btnReset.classList.toggle('opacity-40', true); // reset only enabled on FAULT
+}
+
+function ctrlHandleMessage(data) {
+  let msg;
+  try { msg = JSON.parse(data); } catch { return; }
+
+  if (msg.state === 'IDLE') {
+    ctrlProgress.classList.add('hidden');
+    ctrlBar.style.width = '0%';
+    ctrlStepLabel.textContent = '── Idle ──';
+    btnRun.disabled = false;
+    btnRun.classList.remove('opacity-40');
+    btnReset.disabled = true;
+    btnReset.classList.add('opacity-40');
+    if (msg.result === 'OK') {
+      const t = new Date().toLocaleTimeString();
+      ctrlLastRun.textContent = `Last run: ${t}  ✓ COMPLETE`;
+      ctrlLastRun.className = 'text-xs text-green-400';
+    } else if (msg.result === 'ABORTED') {
+      ctrlLastRun.textContent = `Aborted at ${new Date().toLocaleTimeString()}`;
+      ctrlLastRun.className = 'text-xs text-yellow-400';
+    }
+  } else if (msg.state === 'FAULT') {
+    ctrlProgress.classList.remove('hidden');
+    ctrlStepLabel.textContent = `── FAULT: ${msg.error} ──`;
+    ctrlBar.style.width = '100%';
+    ctrlBar.style.backgroundColor = '#f56565';
+    btnRun.disabled = true;
+    btnRun.classList.add('opacity-40');
+    btnReset.disabled = false;
+    btnReset.classList.remove('opacity-40');
+    ctrlLastRun.textContent = `FAULT: ${msg.error}`;
+    ctrlLastRun.className = 'text-xs text-red-400';
+  } else if (typeof msg.step === 'number' && msg.of > 0) {
+    ctrlProgress.classList.remove('hidden');
+    const pct = Math.round((msg.step / msg.of) * 100);
+    ctrlBar.style.width = pct + '%';
+    ctrlBar.style.backgroundColor = '#48bb78';
+    ctrlStepLabel.textContent = `── Step ${msg.step} of ${msg.of}: ${msg.state} ──`;
+    btnRun.disabled = true;
+    btnRun.classList.add('opacity-40');
+  }
+}
+
+btnCtrlConnect.addEventListener('click', () => {
+  const ip = ctrlIPInput.value.trim();
+  if (!ip) return;
+  if (ctrlWS) { ctrlWS.onclose = null; ctrlWS.close(); ctrlWS = null; }
+  localStorage.setItem('ctrl_ip', ip);
+  ctrlWS = new WebSocket(`ws://${ip}:81`);
+  ctrlWS.onopen    = () => ctrlSetConnected(true);
+  ctrlWS.onclose   = () => { ctrlWS = null; ctrlSetConnected(false); };
+  ctrlWS.onerror   = () => ctrlSetConnected(false);
+  ctrlWS.onmessage = e  => ctrlHandleMessage(e.data);
+});
+
+btnCtrlDisc.addEventListener('click', () => {
+  if (ctrlWS) { ctrlWS.close(); ctrlWS = null; }
+});
+
+btnRun.addEventListener('click',   () => ctrlWS?.send('{"cmd":"RUN"}'));
+btnAbort.addEventListener('click', () => ctrlWS?.send('{"cmd":"ABORT"}'));
+btnReset.addEventListener('click', () => ctrlWS?.send('{"cmd":"RESET"}'));
+</script>
+</body>
+</html>
